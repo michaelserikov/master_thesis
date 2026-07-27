@@ -1,0 +1,194 @@
+"""
+Draws the CRA figures (Emissions / CO2 / Cumulative / Temperature) from a GAMS
+listing file, as FOUR SEPARATE figures (one per panel).
+
+The "below guardrail" metric is the hard, trajectory-based one (Neubersch, eq. 7):
+a scenario counts as "below" if its maximum over the whole horizon stays <= the guardrail.
+
+Cosmetic emission smoothing (variant A, Held-like) applies to the Emissions
+figure only; everything else uses raw solver output.
+"""
+
+import os
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+# ============ CONFIG ============
+DATA_DIR   = r"C:\Users\u301907\Desktop\models runs results\2,5"
+OUT_DIR    = r"C:\Users\u301907\Desktop\models runs results\2,5\2.5 - 3 regimes"
+FILENAME   = "2,5bau-tr0-lp22-2025-2130-25x25-2_and_half_degree.txt"
+GRID_LABEL = "25x25"
+GUARDRAIL  = 2.5
+YEAR0      = 2025
+DT         = 5
+
+# regime label shown in every title, e.g. "no learning", "full learning",
+# "partial learning on alpha"
+REGIME     = "no learning"
+
+SMOOTH_EMISSIONS       = True
+SHOW_V_BEFORE_LEARNING = False
+# ================================
+
+
+def parse_scalar(text, name):
+    m = re.search(rf"{re.escape(name)}\.L\s*=\s*(-?\d+\.?\d*(?:[eE][+-]?\d+)?)", text)
+    return float(m.group(1)) if m else None
+
+
+def parse_block(text, varname):
+    lines = text.splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        if re.search(rf"VARIABLE\s+{re.escape(varname)}\.L\b", ln):
+            start = i
+            break
+    if start is None:
+        raise ValueError(f"Block {varname}.L not found")
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if re.match(r"----\s+\d+\s+VARIABLE", lines[i]):
+            end = i
+            break
+    block = lines[start:end]
+    data, cur_cols = {}, []
+    col_hdr = re.compile(r"^\s*\+?\s*(i\d+(?:\s+i\d+)*)\s*$")
+    for ln in block:
+        h = col_hdr.match(ln)
+        if h:
+            cur_cols = h.group(1).split()
+            continue
+        parts = ln.split()
+        if not parts or not parts[0].isdigit():
+            continue
+        step = int(parts[0])
+        for c, val in zip(cur_cols, parts[1:]):
+            try:
+                data.setdefault(c, {})[step] = float(val)
+            except ValueError:
+                pass
+    scen = sorted(data.keys(), key=lambda s: int(s[1:]))
+    steps = sorted({s for d in data.values() for s in d})
+    arr = np.array([[data[c].get(s, np.nan) for c in scen] for s in steps])
+    return np.array(steps), arr, scen
+
+
+def _held(tau, a, v, b, w):
+    return a * np.exp(-v * tau) + b * tau * np.exp(-w * tau)
+
+
+def _smooth_branch(years, E):
+    E = np.asarray(E, dtype=float)
+    if np.all(np.isnan(E)):
+        return E
+    tau = years - years[0]
+    E0 = max(np.nan_to_num(E[0]), 1e-3)
+    p0 = [E0, 0.05, 0.1 * E0, 0.02]
+    bounds = ([0.0, 1e-4, 0.0, 1e-4], [5 * E0 + 1.0, 1.0, 50 * E0 + 1.0, 1.0])
+    try:
+        popt, _ = curve_fit(_held, tau, E, p0=p0, bounds=bounds, maxfev=20000)
+        fit = _held(tau, *popt)
+        return np.clip(fit, 0.0, max(np.nanmax(E), E0) * 1.05)
+    except Exception:
+        return E
+
+
+def smooth_emissions(years, emis):
+    out = np.empty_like(emis, dtype=float)
+    for j in range(emis.shape[1]):
+        out[:, j] = _smooth_branch(years, emis[:, j])
+    return out
+
+
+def fan(ax, years, mat, mean_color="black"):
+    for j in range(mat.shape[1]):
+        ax.plot(years, mat[:, j], lw=0.8, alpha=0.7)
+    ax.plot(years, np.nanmean(mat, axis=1), color=mean_color, lw=2.5)
+
+
+def box(ax, x, y, s, ha="right", va="top"):
+    ax.text(x, y, s, transform=ax.transAxes, ha=ha, va=va, fontsize=9,
+            bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.8))
+
+
+def make_figures(path, out_dir, regime, grid_label, guardrail, year0, dt,
+                 smooth_flag, show_v):
+    with open(path, "r", errors="ignore") as f:
+        text = f.read()
+
+    goalL = parse_scalar(text, "goal")
+    v     = parse_scalar(text, "v")
+
+    steps, temp, scen = parse_block(text, "Temp")
+    _, emis, _        = parse_block(text, "Emissions")
+    _, conc, _        = parse_block(text, "CO2Conc")
+    _, cum,  _        = parse_block(text, "CumEmi")
+
+    years = year0 + (steps - 1) * dt
+    n_scen = len(scen)
+
+    peak = np.nanmax(temp, axis=0)
+    below = peak <= guardrail
+    n_below = int(below.sum())
+    pct_below = 100.0 * n_below / n_scen
+
+    emis_plot = smooth_emissions(years, emis) if smooth_flag else emis
+
+    os.makedirs(out_dir, exist_ok=True)
+    span = f"({guardrail:.1f}\u00b0C guardrail, {year0}\u2013{years[-1]})"
+
+    def save(fig, tag):
+        fname = f"BAU - {tag} {regime} {guardrail:.1f}C.png".replace(" ", "_")
+        p = os.path.join(out_dir, fname)
+        fig.savefig(p, dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        print("saved ->", p)
+
+   # 1. Emissions
+    fig, ax = plt.subplots(figsize=(7, 5))
+    fan(ax, years, emis_plot)
+    ax.set_title(f"BAU \u2014 Emissions {regime} {span}", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Years"); ax.set_ylabel("Emissions, GtC/yr"); ax.grid(True, alpha=0.3)
+    ax.ticklabel_format(useOffset=False, style="plain", axis="y")   # <-- абсолютные значения
+    ax.set_ylim(0, np.nanmax(emis_plot) * 1.15)                     # <-- ось от 0
+    if show_v and v is not None:
+        box(ax, 0.97, 0.97, f"Optimal pre-learning reduction rate  $v$ = {v:.4f}")
+    save(fig, "Emissions")
+
+    # 2. CO2 concentration
+    fig, ax = plt.subplots(figsize=(7, 5))
+    fan(ax, years, conc)
+    ax.set_title(f"BAU \u2014 CO2 concentration {regime} {span}", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Years"); ax.set_ylabel("CO2 concentration, ppmv"); ax.grid(True, alpha=0.3)
+    save(fig, "CO2 concentration")
+
+    # 3. Cumulative emissions
+    fig, ax = plt.subplots(figsize=(7, 5))
+    fan(ax, years, cum)
+    ax.set_title(f"BAU \u2014 Cumulative emissions {regime} {span}", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Years"); ax.set_ylabel("Cumulative CO2, GtC"); ax.grid(True, alpha=0.3)
+    save(fig, "Cumulative emissions")
+
+    # 4. Temperature
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for j in range(n_scen):
+        ax.plot(years, temp[:, j], lw=0.8, alpha=0.7)
+    ax.plot(years, np.nanmean(temp, axis=1), color="black", lw=2.5,
+            label=f"Mean across {n_scen} states")
+    ax.axhline(guardrail, color="red", ls="--", lw=1.2, label=f"{guardrail:.1f}\u00b0C guardrail")
+    ax.set_title(f"BAU \u2014 Temperature trajectories {regime} {span}", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Years"); ax.set_ylabel("Temperature, \u00b0C"); ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=8)
+    box(ax, 0.97, 0.03, f"below {guardrail:.1f}\u00b0C: {n_below}/{n_scen} = {pct_below:.1f}%",
+        ha="right", va="bottom")
+    save(fig, "Temperature trajectories")
+
+    print(f"scenarios: {n_scen} | below {guardrail}C: {n_below} -> {pct_below:.1f}% "
+          f"| smoothing={'on' if smooth_flag else 'off'}")
+
+
+if __name__ == "__main__":
+    make_figures(os.path.join(DATA_DIR, FILENAME), OUT_DIR, REGIME, GRID_LABEL,
+                 GUARDRAIL, YEAR0, DT, SMOOTH_EMISSIONS, SHOW_V_BEFORE_LEARNING)
