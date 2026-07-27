@@ -1,13 +1,28 @@
 # Master Thesis
 
 ## Title
-Quantifying the Value of Learning about Ocean Heat Uptake: A Cost-Risk Perspective on Ocean Parameter Uncertainty
+**Quantifying the Value of Learning about Ocean Heat Uptake: A Cost-Risk Perspective on Ocean Parameter Uncertainty**
 
-## Description
-This repository contains static GAMS and Python prototype models that will support the development of an integrated 1-box climate-economic model with learning and EVPI analysis.
+## Overview
+This repository contains the computational code developed for my Master's thesis at the University of Hamburg.
 
-## Files
-- python_static_model_march.py
-- python_static_model_april(updated_left_utility_part).py
-- gams_static_model_march.gms
-- gams_static_model_april(updated_left_utility_part).gms
+The thesis investigates uncertainty in ocean heat uptake within a climate-economic modelling framework, with a focus on Bayesian learning and the value of information.
+
+## Repository structure
+
+- `gams/` – climate-economic optimization models with full and partial learning
+- `python/` – parameter-grid generation, data processing, and visualization scripts
+- `figures/` – selected figures produced from the model results
+
+## Methods
+The computational work includes:
+- Bayesian learning under uncertain climate parameters
+- transformation of prior probability distributions using Jacobian-based change-of-variables methods
+- multidimensional integration
+- treatment of Dirac delta distributions
+- climate-economic optimization in GAMS
+- parameter-grid generation and result analysis in Python
+
+## Software
+- GAMS
+- Python
